@@ -4155,7 +4155,7 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds four context-locals so every session-key / UI-owner consumer is
+    Binds five context-locals so every session-key / UI-owner consumer is
     covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
@@ -4166,6 +4166,16 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         return address stamped onto ProcessSession.origin_ui_session_id and
         completion events by modern hermes-agent builds. Authoritative for
         wakeup routing when present (see ``_resolve_completion_target``).
+      * ``gateway.session_context._SESSION_ID`` — the id hermes-agent's
+        subprocess bridge (``tools/environments/local.py``::
+        ``_inject_session_context_env``) exports as ``HERMES_SESSION_ID`` for
+        every ``terminal`` / ``execute_code`` child. Without this binding the
+        bridge finds ``_UNSET`` and keeps the inherited environment, so a child
+        spawned from THIS turn reads whichever session last wrote the
+        process-global ``os.environ`` mirror — which concurrent WebUI turns
+        overwrite constantly. Binding the contextvar here makes the child see
+        this turn's id without ``set_session_vars`` and without touching
+        process env.
       * ``agent.runtime_cwd._SESSION_CWD`` — this turn's workspace, when
         *workspace* is given. The WebUI runs the agent IN-PROCESS, so
         ``os.getcwd()`` is the server's launch directory, not the workspace the
@@ -4205,6 +4215,11 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         tokens["ui_session_id"] = _UI_SID.set(sid)
     except Exception:
         logger.debug("per-turn _SESSION_UI_SESSION_ID bind failed", exc_info=True)
+    try:
+        from gateway.session_context import _SESSION_ID as _SID
+        tokens["session_id"] = _SID.set(sid)
+    except Exception:
+        logger.debug("per-turn _SESSION_ID bind failed", exc_info=True)
     if workspace:
         # Bound via the ContextVar directly, not ``set_session_cwd``, so the
         # reset below can use reset-token semantics like every sibling above.
@@ -4236,6 +4251,13 @@ def _reset_turn_session_identity(tokens) -> None:
             _SCWD.reset(tok)
         except Exception:
             logger.debug("per-turn _SESSION_CWD reset failed", exc_info=True)
+    tok = tokens.get("session_id")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_ID as _SID
+            _SID.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_ID reset failed", exc_info=True)
     tok = tokens.get("ui_session_id")
     if tok is not None:
         try:
